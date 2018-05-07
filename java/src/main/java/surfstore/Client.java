@@ -48,9 +48,12 @@ public final class Client {
         blockStub.ping(Empty.newBuilder().build());
         logger.info("Successfully pinged the Blockstore server");
         
-        // Implement your client here
+        // TODO: Implement your client here
 	}
 
+	/*
+	 * TODO: Add command line handling here
+	 */
     private static Namespace parseArgs(String[] args) {
         ArgumentParser parser = ArgumentParsers.newFor("Client").build()
                 .description("Client for SurfStore");
