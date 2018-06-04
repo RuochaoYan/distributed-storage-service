@@ -1,8 +1,17 @@
 package surfstore;
 
-import java.io.File;
+import java.io.*;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
+import java.util.*;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
+
+import com.google.protobuf.ByteString;
+
 
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -10,7 +19,7 @@ import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.Namespace;
-import surfstore.SurfStoreBasic.Empty;
+import surfstore.SurfStoreBasic.*;
 
 
 public final class Client {
@@ -41,24 +50,48 @@ public final class Client {
         blockChannel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
     }
     
-	private void go() {
+	private void go(Namespace args) {
 		metadataStub.ping(Empty.newBuilder().build());
         logger.info("Successfully pinged the Metadata server");
         
         blockStub.ping(Empty.newBuilder().build());
         logger.info("Successfully pinged the Blockstore server");
-        
-        // TODO: Implement your client here
-	}
 
-	/*
-	 * TODO: Add command line handling here
-	 */
+        String op = args.getString("operation");
+        String fn = args.getString("file_name");
+        
+        switch(op) {
+            case "upload":
+              upload(fn);
+              break;
+            case "download":
+              download(fn, args.getString("dir"));
+              break;
+            case "delete":
+              delete(fn);
+              break;
+            case "getversion":
+              getversion(fn);
+              break;
+            default:
+              break;
+        }
+    }
+
     private static Namespace parseArgs(String[] args) {
         ArgumentParser parser = ArgumentParsers.newFor("Client").build()
                 .description("Client for SurfStore");
         parser.addArgument("config_file").type(String.class)
                 .help("Path to configuration file");
+        parser.addArgument("operation").type(String.class)
+                .help("Operation the user wants to do");
+        parser.addArgument("file_name").type(String.class)
+                .help("File the user wants to operate");
+        
+        if (args.length > 3) {
+          parser.addArgument("dir").type(String.class)
+                .help("Where the user wants to download").setDefault("/");
+        }
         
         Namespace res = null;
         try {
@@ -81,10 +114,169 @@ public final class Client {
         Client client = new Client(config);
         
         try {
-        	client.go();
+        	client.go(c_args);
         } finally {
             client.shutdown();
         }
+    }
+
+    public void upload(String fn) {
+        File f = new File(fn);
+        if (!f.exists() || f.isDirectory()) {
+            System.out.println("Not Found");
+            return;
+        }
+        byte[] buffer = new byte[4096];
+        int read = 0;
+	HashMap<String, ByteString> map = new HashMap<>();
+
+        FileInfo readRequest = FileInfo.newBuilder().setFilename(fn).build();
+        FileInfo readResponse = metadataStub.readFile(readRequest);
+
+        ArrayList<String> hashlist = new ArrayList<>();
+
+        MessageDigest digest = null;
+	try {
+		digest = MessageDigest.getInstance("SHA-256");		
+	} catch (NoSuchAlgorithmException e) {
+		e.printStackTrace();
+		System.exit(1);
+	}
+
+        try {
+	        FileInputStream fis = new FileInputStream(f);
+
+        	while ( (read = fis.read(buffer)) > 0 ) {
+	            byte[] hash = digest.digest(buffer);
+        	    String encoded = Base64.getEncoder().encodeToString(hash);
+	            hashlist.add(encoded);
+	            map.put(encoded, ByteString.copyFrom(buffer));
+	        }
+
+		fis.close();
+	} catch (Exception e) {
+		e.printStackTrace();
+		System.exit(1);
+        }
+
+        FileInfo modifyRequest = FileInfo.newBuilder().setFilename(fn).setVersion(readResponse.getVersion() + 1).addAllBlocklist(hashlist).build();
+
+	WriteResult modifyResponse = metadataStub.modifyFile(modifyRequest);
+	WriteResult.Result res = modifyResponse.getResult();
+
+        while (res != WriteResult.Result.OK) {
+            if (res == WriteResult.Result.OLD_VERSION) {
+                modifyRequest = FileInfo.newBuilder().setFilename(fn).setVersion(modifyResponse.getCurrentVersion() + 1).addAllBlocklist(hashlist).build();
+	        modifyResponse = metadataStub.modifyFile(modifyRequest);
+	        res = modifyResponse.getResult();
+            }
+            else if (res == WriteResult.Result.MISSING_BLOCKS) {
+                List<String> missing_blocks = modifyResponse.getMissingBlocksList();
+                for (String s : missing_blocks) {
+                    Block storeRequest = Block.newBuilder().setHash(s).setData(map.get(s)).build();
+                    blockStub.storeBlock(storeRequest);
+                }
+
+	        modifyResponse = metadataStub.modifyFile(modifyRequest);
+	        res = modifyResponse.getResult();
+            }
+        }
+
+        System.out.println("OK");
+
+    }
+
+    public void download(String fn, String dir) {
+        File f = new File(dir + "/" + fn);
+        byte[] buffer = new byte[4096];
+        int read = 0;
+	HashMap<String, ByteString> map = new HashMap<>();
+
+        MessageDigest digest = null;
+	try {
+		digest = MessageDigest.getInstance("SHA-256");		
+	} catch (NoSuchAlgorithmException e) {
+		e.printStackTrace();
+		System.exit(1);
+	}
+
+        FileInfo readRequest = FileInfo.newBuilder().setFilename(fn).build();
+        FileInfo readResponse = metadataStub.readFile(readRequest);
+        List<String> blocklist = readResponse.getBlocklistList();
+
+        if (blocklist.size() == 1 && blocklist.get(0) == "0") {
+            System.out.println("Not Found");
+            return;
+        }
+
+        if (f.exists() || !f.isDirectory()) {
+        	try {
+	        	FileInputStream fis = new FileInputStream(f);
+
+        		while ( (read = fis.read(buffer)) > 0 ) {
+	        	    byte[] hash = digest.digest(buffer);
+	        	    String encoded = Base64.getEncoder().encodeToString(hash);
+	        	    map.put(encoded, ByteString.copyFrom(buffer));
+		        }
+			fis.close();
+			f.delete();
+		} catch (Exception e) {
+			e.printStackTrace();
+			System.exit(1);
+       		}
+        }
+
+	try {
+	    FileOutputStream stream = new FileOutputStream(dir + "/" + fn);
+            for (String s : blocklist) {
+		if (!map.containsKey(s)) {
+        		Block getRequest = Block.newBuilder().setHash(s).build();
+		        Block getResponse = blockStub.getBlock(getRequest);
+			map.put(s, getResponse.getData());
+		}
+	        stream.write(map.get(s).toByteArray());
+            }
+	    stream.close();
+	}
+        catch (Exception e) {
+			e.printStackTrace();
+			System.exit(1);
+        }
+        System.out.println("OK");
+    }
+
+    public void delete(String fn) {
+
+        FileInfo readRequest = FileInfo.newBuilder().setFilename(fn).build();
+        FileInfo readResponse = metadataStub.readFile(readRequest);
+        List<String> blocklist = readResponse.getBlocklistList();
+
+        if (blocklist.size() == 1 && blocklist.get(0) == "0") {
+            System.out.println("OK");
+            return;
+        }
+
+        FileInfo modifyRequest = FileInfo.newBuilder().setFilename(fn).setVersion(readResponse.getVersion() + 1).setBlocklist(0, "0").build();
+
+	WriteResult modifyResponse = metadataStub.modifyFile(modifyRequest);
+	WriteResult.Result res = modifyResponse.getResult();
+
+        while (res != WriteResult.Result.OK) {
+            if (res == WriteResult.Result.OLD_VERSION) {
+                modifyRequest = FileInfo.newBuilder().setFilename(fn).setVersion(modifyResponse.getCurrentVersion() + 1).setBlocklist(0, "0").build();
+	        modifyResponse = metadataStub.modifyFile(modifyRequest);
+	        res = modifyResponse.getResult();
+	    }
+	}
+
+	System.out.println("OK");
+
+    }
+
+    public void getversion(String fn) {
+        FileInfo request = FileInfo.newBuilder().setFilename(fn).build();
+        FileInfo response = metadataStub.getVersion(request);
+        System.out.println(response.getVersion());
     }
 
 }
