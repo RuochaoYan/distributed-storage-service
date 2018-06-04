@@ -123,7 +123,7 @@ public final class Client {
     public void upload(String fn) {
         File f = new File(fn);
         if (!f.exists() || f.isDirectory()) {
-            System.out.println("Not Found");
+            System.err.println("Not Found");
             return;
         }
         byte[] buffer = new byte[4096];
@@ -204,12 +204,12 @@ public final class Client {
         FileInfo readResponse = metadataStub.readFile(readRequest);
         List<String> blocklist = readResponse.getBlocklistList();
 
-        if (readResponse.getVersion() == 0 || (blocklist.size() == 1 && blocklist.get(0) == "0")) {
+        if (readResponse.getVersion() == 0 || (blocklist.size() == 1 && blocklist.get(0).equals("0"))) {
             System.out.println("Not Found");
             return;
         }
 
-        if (f.exists() || !f.isDirectory()) {
+        if (f.exists() && !f.isDirectory()) {
         	try {
 	        	FileInputStream fis = new FileInputStream(f);
 
@@ -252,7 +252,7 @@ public final class Client {
         List<String> blocklist = readResponse.getBlocklistList();
 
         if (readResponse.getVersion() == 0 || (blocklist.size() == 1 && blocklist.get(0) == "0")) {
-            System.out.println("OK");
+            System.out.println("Not Found");
             return;
         }
 
