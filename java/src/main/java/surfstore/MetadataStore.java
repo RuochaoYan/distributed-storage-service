@@ -12,6 +12,8 @@ import java.util.HashSet;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 import io.grpc.stub.StreamObserver;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
@@ -31,7 +33,7 @@ public final class MetadataStore {
 
 	private void start(int port, int numThreads) throws IOException {
         server = ServerBuilder.forPort(port)
-                .addService(new MetadataStoreImpl())
+                .addService(new MetadataStoreImpl(config))
                 .executor(Executors.newFixedThreadPool(numThreads))
                 .build()
                 .start();
@@ -98,15 +100,20 @@ public final class MetadataStore {
     static class MetadataStoreImpl extends MetadataStoreGrpc.MetadataStoreImplBase {
         protected Map<String, String[]> blocklistMap;
         protected Map<String, Integer> versionMap;
-        protected Set<String> blockSet;
         protected boolean isLeader;
+        private final ManagedChannel blockChannel;
+        private final BlockStoreGrpc.BlockStoreBlockingStub blockStub;
+        private final ConfigReader config;
 
-        public MetadataStoreImpl(){
+        public MetadataStoreImpl(ConfigReader config){
             super();
             this.blocklistMap = new HashMap<String, String[]>();
             this.versionMap = new HashMap<String, Integer>();
-            this.blockSet = new HashSet<String>();
             this.isLeader = true;
+            this.blockChannel = ManagedChannelBuilder.forAddress("127.0.0.1", config.getBlockPort())
+                .usePlaintext(true).build();
+            this.blockStub = BlockStoreGrpc.newBlockingStub(blockChannel);
+            this.config = config;
         }
 
         @Override
@@ -128,11 +135,12 @@ public final class MetadataStore {
             }
             else{
                 String[] blocklist = blocklistMap.get(request.getFilename());
-                int version = versionMap.get(request.getVersion());
+                int version = versionMap.get(request.getFilename());
                 for(String block : blocklist){
                     builder.addBlocklist(block);
                 }
                 builder.setVersion(version);
+                builder.setFilename(request.getFilename());
             }
             FileInfo response = builder.build();
             responseObserver.onNext(response);
@@ -144,38 +152,48 @@ public final class MetadataStore {
             io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.WriteResult> responseObserver) {
             String fileName = request.getFilename();
             logger.info("Modifying file with name " + fileName);
-
             
             WriteResult.Builder builder = WriteResult.newBuilder();
-
-            if(!blocklistMap.containsKey(fileName)){
-                blocklistMap.put(fileName, new String[0]);
-                versionMap.put(fileName, 0);
-            }
-            int oldVersion = versionMap.get(fileName);
-            String[] oldBlocklist = blocklistMap.get(fileName);
-            if(request.getVersion() - oldVersion == 1){
-                builder.setCurrentVersion(request.getVersion());
-                builder.setResultValue(0);
-                int missCount = 0;
-                String[] newBlocklist = request.getBlocklistList().toArray(new String[request.getBlocklistList().size()]);
-                for(String block : newBlocklist){
-                    if(!blockSet.contains(block)){
-                        missCount++;
-                        builder.addMissingBlocks(block);
-                        blockSet.add(block);
-                    }
-                }
-                if(missCount != 0)
-                    builder.setResultValue(2);
-                blocklistMap.put(fileName, newBlocklist);
-                versionMap.put(fileName, request.getVersion());
+            if(!isLeader){
+                builder.setResultValue(3);
             }
             else{
-                builder.setResultValue(1);
-                builder.setCurrentVersion(oldVersion);
-                logger.info("Modification failed!");
+                if(!blocklistMap.containsKey(fileName)){
+                    blocklistMap.put(fileName, new String[0]);
+                    versionMap.put(fileName, 0);
+                }
+                int oldVersion = versionMap.get(fileName);
+                String[] oldBlocklist = blocklistMap.get(fileName);
+                if(request.getVersion() - oldVersion == 1){
+                    int missCount = 0;
+                    String[] newBlocklist = request.getBlocklistList().toArray(new String[request.getBlocklistList().size()]);
+                    for(String block : newBlocklist){
+                        Block checkRequest = Block.newBuilder().setHash(block).build();
+                        SimpleAnswer checkResponse = blockStub.hasBlock(checkRequest);
+                        if(!checkResponse.getAnswer()){
+                            missCount++;
+                            builder.addMissingBlocks(block);
+                        }
+                    }
+                    if(missCount != 0){
+                        builder.setCurrentVersion(oldVersion);
+                        builder.setResultValue(2);
+                    }
+                    else{
+                        builder.setResultValue(0);
+                        builder.setCurrentVersion(request.getVersion());
+                        blocklistMap.put(fileName, newBlocklist);
+                        versionMap.put(fileName, request.getVersion());
+                    }
+
+                }
+                else{
+                    builder.setResultValue(1);
+                    builder.setCurrentVersion(oldVersion);
+                    logger.info("Modification failed!");
+                }                
             }
+
 
             WriteResult response = builder.build();
             responseObserver.onNext(response);
@@ -189,13 +207,14 @@ public final class MetadataStore {
             logger.info("Deleting file with name " + fileName);
 
             WriteResult.Builder builder = WriteResult.newBuilder();
-            // delete a file that doesn't exist?
 
             int oldVersion = versionMap.get(fileName);
             if(request.getVersion() - oldVersion == 1){
                 builder.setResultValue(0);
                 builder.setCurrentVersion(0);
-                blocklistMap.put(fileName, new String[0]);
+                String[] newBlocklist = new String[1];
+                newBlocklist[0] = "0";
+                blocklistMap.put(fileName, newBlocklist);
                 versionMap.put(fileName, request.getVersion());
             }
             else{
@@ -244,7 +263,10 @@ public final class MetadataStore {
             String fileName = request.getFilename();
             logger.info("Getting version of file: " + fileName);
             FileInfo.Builder builder = FileInfo.newBuilder();
-            int version = versionMap.get(fileName);
+            int version = 0;
+            if(blocklistMap.containsKey(fileName)){
+                version = versionMap.get(fileName);
+            }
             builder.setVersion(version);
             builder.setFilename(fileName);
             FileInfo response = builder.build();

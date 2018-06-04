@@ -204,7 +204,7 @@ public final class Client {
         FileInfo readResponse = metadataStub.readFile(readRequest);
         List<String> blocklist = readResponse.getBlocklistList();
 
-        if (blocklist.size() == 1 && blocklist.get(0) == "0") {
+        if (readResponse.getVersion() == 0 || (blocklist.size() == 1 && blocklist.get(0) == "0")) {
             System.out.println("Not Found");
             return;
         }
@@ -251,21 +251,21 @@ public final class Client {
         FileInfo readResponse = metadataStub.readFile(readRequest);
         List<String> blocklist = readResponse.getBlocklistList();
 
-        if (blocklist.size() == 1 && blocklist.get(0) == "0") {
+        if (readResponse.getVersion() == 0 || (blocklist.size() == 1 && blocklist.get(0) == "0")) {
             System.out.println("OK");
             return;
         }
 
-        FileInfo modifyRequest = FileInfo.newBuilder().setFilename(fn).setVersion(readResponse.getVersion() + 1).setBlocklist(0, "0").build();
+        FileInfo deleteRequest = FileInfo.newBuilder().setFilename(fn).setVersion(readResponse.getVersion() + 1).build();
 
-	WriteResult modifyResponse = metadataStub.modifyFile(modifyRequest);
-	WriteResult.Result res = modifyResponse.getResult();
+	WriteResult deleteResponse = metadataStub.deleteFile(deleteRequest);
+	WriteResult.Result res = deleteResponse.getResult();
 
         while (res != WriteResult.Result.OK) {
             if (res == WriteResult.Result.OLD_VERSION) {
-                modifyRequest = FileInfo.newBuilder().setFilename(fn).setVersion(modifyResponse.getCurrentVersion() + 1).setBlocklist(0, "0").build();
-	        modifyResponse = metadataStub.modifyFile(modifyRequest);
-	        res = modifyResponse.getResult();
+                deleteRequest = FileInfo.newBuilder().setFilename(fn).setVersion(deleteResponse.getCurrentVersion() + 1).build();
+	        deleteResponse = metadataStub.deleteFile(deleteRequest);
+	        res = deleteResponse.getResult();
 	    }
 	}
 
