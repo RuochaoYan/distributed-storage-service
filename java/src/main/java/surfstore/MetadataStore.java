@@ -151,6 +151,9 @@ public final class MetadataStore {
         public void modifyFile(surfstore.SurfStoreBasic.FileInfo request,
             io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.WriteResult> responseObserver) {
             String fileName = request.getFilename();
+            int lastSlash = fileName.lastIndexOf('/');
+            if(lastSlash >= 0)
+                fileName = fileName.substring(lastSlash + 1);
             logger.info("Modifying file with name " + fileName);
             
             WriteResult.Builder builder = WriteResult.newBuilder();
