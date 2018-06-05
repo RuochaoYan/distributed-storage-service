@@ -131,7 +131,7 @@ public final class Client {
         
         try {
         	client.go(c_args);
-		client.distributedTest(config);
+		// client.distributedTest(config);
         } finally {
             client.shutdown();
         }
@@ -320,7 +320,9 @@ public final class Client {
         upload("./testfiles/set1/test3.txt");
         upload("./testfiles/set2/test1.txt");
         upload("./testfiles/set3/test1.txt");
-        getversion("test1.txt");
+        FileInfo request = FileInfo.newBuilder().setFilename("test1.txt").build();
+        FileInfo response = metadataStubf1.getVersion(request);
+        System.out.println(response.getVersion());
         metadataStubf1.restore(Empty.newBuilder().build());
         
         try {
@@ -328,7 +330,10 @@ public final class Client {
         } catch(InterruptedException e) {
             e.printStackTrace();
         }
-        getversion("test1.txt");
+        delete("test2.txt");
+        request = FileInfo.newBuilder().setFilename("test1.txt").build();
+        response = metadataStubf1.getVersion(request);
+        System.out.println(response.getVersion());
     }
 
 }

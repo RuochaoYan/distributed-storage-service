@@ -323,6 +323,8 @@ public final class MetadataStore {
         @Override
         public void crash(surfstore.SurfStoreBasic.Empty request,
             io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.Empty> responseObserver) {
+            logger.info("Getting crashed.");
+
             isCrashed = true;
             Empty response = Empty.newBuilder().build();
             responseObserver.onNext(response);
@@ -332,6 +334,8 @@ public final class MetadataStore {
         @Override
         public void restore(surfstore.SurfStoreBasic.Empty request,
             io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.Empty> responseObserver) {
+            logger.info("Restoring.");
+            isCrashed = false;
             Empty response = Empty.newBuilder().build();
             responseObserver.onNext(response);
             responseObserver.onCompleted();
@@ -365,6 +369,8 @@ public final class MetadataStore {
         @Override
         public void appendLog(surfstore.SurfStoreBasic.Log request,
             io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.FollowerStatus> responseObserver) {
+            logger.info("Appending log on: " + request.getFilename());
+
             FollowerStatus.Builder builder = FollowerStatus.newBuilder();
             if(isCrashed){
                 builder.setResultValue(1);
@@ -373,9 +379,12 @@ public final class MetadataStore {
                 logFilename.add(request.getFilename());
                 logBlocklist.add(request.getBlocklistList());
                 logVersion.add(request.getVersion());
+                logger.info("The size of log is: " + logBlocklist.size());
+                logger.info("The version of current log is: " + request.getVersion());
                 builder.setResultValue(0);
             }
             else{
+                logger.info("The size of log is: " + logBlocklist.size());
                 builder.setResultValue(2);
                 builder.setLatestLog(logFilename.size()-1);
             }
@@ -387,6 +396,8 @@ public final class MetadataStore {
         @Override
         public void commitOperation(surfstore.SurfStoreBasic.Empty request,
             io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.Empty> responseObserver) {
+            logger.info("Committing operation");
+
             blocklistMap.put(logFilename.get(logFilename.size()-1), logBlocklist.get(logBlocklist.size()-1));
             versionMap.put(logFilename.get(logFilename.size()-1), logVersion.get(logVersion.size()-1));
             Empty response = Empty.newBuilder().build();
