@@ -131,6 +131,7 @@ public final class Client {
         
         try {
         	client.go(c_args);
+		client.distributedTest(config);
         } finally {
             client.shutdown();
         }
