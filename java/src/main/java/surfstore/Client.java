@@ -28,13 +28,19 @@ public final class Client {
     private final ManagedChannel metadataChannel;
     private final MetadataStoreGrpc.MetadataStoreBlockingStub metadataStub;
 
+    // for distributed test
+    ManagedChannel metadataChannelf1;
+    MetadataStoreGrpc.MetadataStoreBlockingStub metadataStubf1;
+    ManagedChannel metadataChannelf2;
+    MetadataStoreGrpc.MetadataStoreBlockingStub metadataStubf2;
+
     private final ManagedChannel blockChannel;
     private final BlockStoreGrpc.BlockStoreBlockingStub blockStub;
 
     private final ConfigReader config;
 
     public Client(ConfigReader config) {
-        this.metadataChannel = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(1))
+        this.metadataChannel = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(config.getLeaderNum()))
                 .usePlaintext(true).build();
         this.metadataStub = MetadataStoreGrpc.newBlockingStub(metadataChannel);
 
@@ -45,13 +51,23 @@ public final class Client {
         this.config = config;
     }
 
+    // for distributed test
+    public void initFollower(ConfigReader config) {
+        this.metadataChannelf1 = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(2))
+                .usePlaintext(true).build();
+        this.metadataStubf1 = MetadataStoreGrpc.newBlockingStub(metadataChannelf1);
+        this.metadataChannelf2 = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(3))
+                .usePlaintext(true).build();
+        this.metadataStubf2 = MetadataStoreGrpc.newBlockingStub(metadataChannelf2);
+    }
+
     public void shutdown() throws InterruptedException {
         metadataChannel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
         blockChannel.shutdown().awaitTermination(5, TimeUnit.SECONDS);
     }
     
-	private void go(Namespace args) {
-		metadataStub.ping(Empty.newBuilder().build());
+    private void go(Namespace args) {
+	metadataStub.ping(Empty.newBuilder().build());
         logger.info("Successfully pinged the Metadata server");
         
         blockStub.ping(Empty.newBuilder().build());
@@ -252,7 +268,7 @@ public final class Client {
         FileInfo readResponse = metadataStub.readFile(readRequest);
         List<String> blocklist = readResponse.getBlocklistList();
 
-        if (readResponse.getVersion() == 0 || (blocklist.size() == 1 && blocklist.get(0) == "0")) {
+        if (readResponse.getVersion() == 0 || (blocklist.size() == 1 && blocklist.get(0).equals("0"))) {
             System.out.println("Not Found");
             return;
         }
@@ -278,6 +294,40 @@ public final class Client {
         FileInfo request = FileInfo.newBuilder().setFilename(fn).build();
         FileInfo response = metadataStub.getVersion(request);
         System.out.println(response.getVersion());
+    }
+
+    // for distributed test
+    public void distributedTest(ConfigReader config) {
+
+        initFollower(config);
+
+	metadataStub.ping(Empty.newBuilder().build());
+        logger.info("Successfully pinged the Metadata server");
+        
+        blockStub.ping(Empty.newBuilder().build());
+        logger.info("Successfully pinged the Blockstore server");
+
+	metadataStubf1.ping(Empty.newBuilder().build());
+        logger.info("Successfully pinged the Metadata follower1 server");
+
+	metadataStubf2.ping(Empty.newBuilder().build());
+        logger.info("Successfully pinged the Metadata follower2 server");
+
+        upload("./testfiles/set1/test1.txt");
+        upload("./testfiles/set1/test2.txt");
+        metadataStubf1.crash(Empty.newBuilder().build());
+        upload("./testfiles/set1/test3.txt");
+        upload("./testfiles/set2/test1.txt");
+        upload("./testfiles/set3/test1.txt");
+        getversion("test1.txt");
+        metadataStubf1.restore(Empty.newBuilder().build());
+        
+        try {
+            Thread.sleep(5000);
+        } catch(InterruptedException e) {
+            e.printStackTrace();
+        }
+        getversion("test1.txt");
     }
 
 }
