@@ -150,7 +150,8 @@ public final class Client {
 	            byte[] hash = digest.digest(buffer);
         	    String encoded = Base64.getEncoder().encodeToString(hash);
 	            hashlist.add(encoded);
-	            map.put(encoded, ByteString.copyFrom(buffer));
+	            map.put(encoded, ByteString.copyFrom(buffer, 0, read));
+		    Arrays.fill(buffer, (byte)0);
 	        }
 
 		fis.close();
