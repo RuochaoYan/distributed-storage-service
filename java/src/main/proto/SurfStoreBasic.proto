@@ -69,6 +69,12 @@ service MetadataStore {
 
     // YOU CAN INSERT ADDITIONAL RPC CALLS HERE TO IMPLEMENT PART 2
     // OF THE PROJECT, BUT PLEASE DON'T MODIFY THE ABOVE CALLS/ARGUMENTS
+
+    // Append a new log to follower
+    rpc AppendLog(Log) returns (FollowerStatus) {}
+
+    // Tell follower to commit
+    rpc CommitOperation(Empty) returns (Empty) {}
 }
 
 service BlockStore {
@@ -127,4 +133,20 @@ message SimpleAnswer {
 
 message NodeList {
     repeated int32 nodelist = 1;
+}
+
+message Log {
+    int32 log_index = 1;
+    string filename = 2;
+    repeated string blocklist = 3;
+}
+
+message FollowerStatus {
+    enum Result {
+        OK = 0;
+        CRASHED = 1;
+        LAG = 2;
+    }
+    Result result = 1;
+    int32 latest_log = 2;
 }
