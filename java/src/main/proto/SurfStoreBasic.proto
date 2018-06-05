@@ -139,6 +139,7 @@ message Log {
     int32 log_index = 1;
     string filename = 2;
     repeated string blocklist = 3;
+    int32 version = 4;
 }
 
 message FollowerStatus {

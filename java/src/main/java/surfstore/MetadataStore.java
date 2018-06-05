@@ -8,6 +8,8 @@ import java.util.Map;
 import java.util.HashMap;
 import java.util.Set;
 import java.util.HashSet;
+import java.util.List;
+import java.util.LinkedList;
 
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
@@ -26,14 +28,16 @@ public final class MetadataStore {
 
     protected Server server;
 	protected ConfigReader config;
+    protected boolean isLeader;
 
-    public MetadataStore(ConfigReader config) {
+    public MetadataStore(ConfigReader config, boolean isLeader) {
     	this.config = config;
+        this.isLeader = isLeader;
 	}
 
 	private void start(int port, int numThreads) throws IOException {
         server = ServerBuilder.forPort(port)
-                .addService(new MetadataStoreImpl(config))
+                .addService(new MetadataStoreImpl(config, isLeader))
                 .executor(Executors.newFixedThreadPool(numThreads))
                 .build()
                 .start();
@@ -92,28 +96,50 @@ public final class MetadataStore {
             throw new RuntimeException(String.format("metadata%d not in config file", c_args.getInt("number")));
         }
 
-        final MetadataStore server = new MetadataStore(config);
+        boolean isLeader = c_args.getInt("number") == config.getLeaderNum() ? true : false;
+
+        final MetadataStore server = new MetadataStore(config, isLeader);
         server.start(config.getMetadataPort(c_args.getInt("number")), c_args.getInt("threads"));
         server.blockUntilShutdown();
     }
 
     static class MetadataStoreImpl extends MetadataStoreGrpc.MetadataStoreImplBase {
-        protected Map<String, String[]> blocklistMap;
+        protected Map<String, List<String>> blocklistMap;
         protected Map<String, Integer> versionMap;
         protected boolean isLeader;
         private final ManagedChannel blockChannel;
         private final BlockStoreGrpc.BlockStoreBlockingStub blockStub;
         private final ConfigReader config;
+        protected List<String> logFilename;
+        protected List<List<String>> logBlocklist;
+        protected List<Integer> logVersion;
+        protected boolean isCrashed;
 
-        public MetadataStoreImpl(ConfigReader config){
+        private final ManagedChannel followerMetadataChannel1;
+        private final MetadataStoreGrpc.MetadataStoreBlockingStub followerMetadataStub1;
+        private final ManagedChannel followerMetadataChannel2;
+        private final MetadataStoreGrpc.MetadataStoreBlockingStub followerMetadataStub2;
+
+        public MetadataStoreImpl(ConfigReader config, boolean isLeader){
             super();
-            this.blocklistMap = new HashMap<String, String[]>();
+            this.blocklistMap = new HashMap<String, List<String>>();
             this.versionMap = new HashMap<String, Integer>();
-            this.isLeader = true;
             this.blockChannel = ManagedChannelBuilder.forAddress("127.0.0.1", config.getBlockPort())
                 .usePlaintext(true).build();
             this.blockStub = BlockStoreGrpc.newBlockingStub(blockChannel);
             this.config = config;
+            this.isLeader = isLeader;
+            this.logFilename = new LinkedList<String>();
+            this.logBlocklist = new LinkedList<List<String>>();
+            this.logVersion = new LinkedList<Integer>();
+            this.isCrashed = false;
+
+            this.followerMetadataChannel1 = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(2))
+                .usePlaintext(true).build();
+            this.followerMetadataStub1 = MetadataStoreGrpc.newBlockingStub(followerMetadataChannel1);
+            this.followerMetadataChannel2 = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(3))
+                .usePlaintext(true).build();
+            this.followerMetadataStub2 = MetadataStoreGrpc.newBlockingStub(followerMetadataChannel2);
         }
 
         @Override
@@ -134,10 +160,12 @@ public final class MetadataStore {
                 builder.setVersion(0);
             }
             else{
-                String[] blocklist = blocklistMap.get(request.getFilename());
                 int version = versionMap.get(request.getFilename());
-                for(String block : blocklist){
-                    builder.addBlocklist(block);
+                if(!isCrashed || isLeader){
+                    List<String> blocklist = blocklistMap.get(request.getFilename());
+                    for(String block : blocklist){
+                        builder.addBlocklist(block);
+                    }
                 }
                 builder.setVersion(version);
                 builder.setFilename(request.getFilename());
@@ -145,6 +173,51 @@ public final class MetadataStore {
             FileInfo response = builder.build();
             responseObserver.onNext(response);
             responseObserver.onCompleted();  
+        }
+
+        public void handleLogAndCommit(String fileName, int version, List<String> blocklist){
+            logFilename.add(fileName);
+            logBlocklist.add(blocklist);
+            logVersion.add(version);
+            Log appendLogRequest = Log.newBuilder().setLogIndex(logFilename.size()-1).setFilename(fileName).addAllBlocklist(blocklist).setVersion(version).build();
+            FollowerStatus logResponse1 = followerMetadataStub1.appendLog(appendLogRequest);
+            FollowerStatus logResponse2 = followerMetadataStub2.appendLog(appendLogRequest);
+            FollowerStatus.Result res1 = logResponse1.getResult();
+            FollowerStatus.Result res2 = logResponse2.getResult();
+            if(res1 == FollowerStatus.Result.LAG){
+                int f1LatestLog = logResponse1.getLatestLog();
+                for(int i = f1LatestLog+1; i < logFilename.size(); i++){
+                    Log uptodateRequest = Log.newBuilder().setLogIndex(i).setFilename(logFilename.get(i)).addAllBlocklist(logBlocklist.get(i)).setVersion(logVersion.get(i)).build();
+                    FollowerStatus uptodateResponse = followerMetadataStub1.appendLog(uptodateRequest);
+                    if(uptodateResponse.getResult() == FollowerStatus.Result.OK){
+                        Empty commitRequest = Empty.newBuilder().build();
+                        followerMetadataStub1.commitOperation(commitRequest);
+                    }
+                    else
+                        break;
+                }
+            }
+            if(res2 == FollowerStatus.Result.LAG){
+                int f2LatestLog = logResponse2.getLatestLog();
+                for(int i = f2LatestLog+1; i < logFilename.size(); i++){
+                    Log uptodateRequest = Log.newBuilder().setLogIndex(i).setFilename(logFilename.get(i)).addAllBlocklist(logBlocklist.get(i)).setVersion(logVersion.get(i)).build();
+                    FollowerStatus uptodateResponse = followerMetadataStub2.appendLog(uptodateRequest);
+                    if(uptodateResponse.getResult() != FollowerStatus.Result.OK){
+                        Empty commitRequest = Empty.newBuilder().build();
+                        followerMetadataStub2.commitOperation(commitRequest);
+                    }
+                    else
+                        break;
+                }
+            }
+            if(res1 == FollowerStatus.Result.OK || res2 == FollowerStatus.Result.OK){
+                Empty commitRequest = Empty.newBuilder().build();
+                followerMetadataStub1.commitOperation(commitRequest);
+                followerMetadataStub2.commitOperation(commitRequest);
+
+                blocklistMap.put(fileName, blocklist);
+                versionMap.put(fileName, version);
+            }
         }
 
         @Override
@@ -157,19 +230,19 @@ public final class MetadataStore {
             logger.info("Modifying file with name " + fileName);
             
             WriteResult.Builder builder = WriteResult.newBuilder();
-            if(!isLeader){
+            if(isCrashed || !isLeader){
                 builder.setResultValue(3);
             }
             else{
                 if(!blocklistMap.containsKey(fileName)){
-                    blocklistMap.put(fileName, new String[0]);
+                    blocklistMap.put(fileName, new LinkedList<String>());
                     versionMap.put(fileName, 0);
                 }
                 int oldVersion = versionMap.get(fileName);
-                String[] oldBlocklist = blocklistMap.get(fileName);
+                List<String> oldBlocklist = blocklistMap.get(fileName);
                 if(request.getVersion() - oldVersion == 1){
                     int missCount = 0;
-                    String[] newBlocklist = request.getBlocklistList().toArray(new String[request.getBlocklistList().size()]);
+                    List<String> newBlocklist = request.getBlocklistList();
                     for(String block : newBlocklist){
                         Block checkRequest = Block.newBuilder().setHash(block).build();
                         SimpleAnswer checkResponse = blockStub.hasBlock(checkRequest);
@@ -185,8 +258,8 @@ public final class MetadataStore {
                     else{
                         builder.setResultValue(0);
                         builder.setCurrentVersion(request.getVersion());
-                        blocklistMap.put(fileName, newBlocklist);
-                        versionMap.put(fileName, request.getVersion());
+                        // update the log and send the log to the followers
+                        handleLogAndCommit(fileName, request.getVersion(), newBlocklist);
                     }
 
                 }
@@ -211,19 +284,27 @@ public final class MetadataStore {
 
             WriteResult.Builder builder = WriteResult.newBuilder();
 
-            int oldVersion = versionMap.get(fileName);
-            if(request.getVersion() - oldVersion == 1){
-                builder.setResultValue(0);
-                builder.setCurrentVersion(0);
-                String[] newBlocklist = new String[1];
-                newBlocklist[0] = "0";
-                blocklistMap.put(fileName, newBlocklist);
-                versionMap.put(fileName, request.getVersion());
+            if(isCrashed || !isLeader){
+                builder.setResultValue(3);
             }
             else{
-                builder.setResultValue(1);
-                builder.setCurrentVersion(oldVersion);
-                logger.info("Deletion failed!");
+                int oldVersion = versionMap.get(fileName);
+                if(request.getVersion() - oldVersion == 1){
+                    builder.setResultValue(0);
+                    builder.setCurrentVersion(0);
+
+                    
+
+                    List<String> newBlocklist = new LinkedList<>();
+                    newBlocklist.add("0");
+                    // send a log to the followers
+                    handleLogAndCommit(fileName, request.getVersion(), newBlocklist);
+                }
+                else{
+                    builder.setResultValue(1);
+                    builder.setCurrentVersion(oldVersion);
+                    logger.info("Deletion failed!");
+                }                
             }
 
             WriteResult response = builder.build();
@@ -239,26 +320,30 @@ public final class MetadataStore {
             responseObserver.onCompleted();            
         }
 
-        // @Override
-        // public void crash(surfstore.SurfStoreBasic.Empty request,
-        //     io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.Empty> responseObserver) {
-        //     responseObserver.onNext(response);
-        //     responseObserver.onCompleted();            
-        // }
+        @Override
+        public void crash(surfstore.SurfStoreBasic.Empty request,
+            io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.Empty> responseObserver) {
+            isCrashed = true;
+            Empty response = Empty.newBuilder().build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();            
+        }
 
-        // @Override
-        // public void restore(surfstore.SurfStoreBasic.Empty request,
-        //     io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.Empty> responseObserver) {
-        //     responseObserver.onNext(response);
-        //     responseObserver.onCompleted();
-        // }
+        @Override
+        public void restore(surfstore.SurfStoreBasic.Empty request,
+            io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.Empty> responseObserver) {
+            Empty response = Empty.newBuilder().build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
 
-        // @Override
-        // public void isCrashed(surfstore.SurfStoreBasic.Empty request,
-        //     io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.SimpleAnswer> responseObserver) {
-        //     responseObserver.onNext(response);
-        //     responseObserver.onCompleted();
-        // }
+        @Override
+        public void isCrashed(surfstore.SurfStoreBasic.Empty request,
+            io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.SimpleAnswer> responseObserver) {
+            SimpleAnswer response = SimpleAnswer.newBuilder().setAnswer(isCrashed).build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
+        }
 
         @Override
         public void getVersion(surfstore.SurfStoreBasic.FileInfo request,
@@ -275,6 +360,38 @@ public final class MetadataStore {
             FileInfo response = builder.build();
             responseObserver.onNext(response);
             responseObserver.onCompleted();            
+        }
+
+        @Override
+        public void appendLog(surfstore.SurfStoreBasic.Log request,
+            io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.FollowerStatus> responseObserver) {
+            FollowerStatus.Builder builder = FollowerStatus.newBuilder();
+            if(isCrashed){
+                builder.setResultValue(1);
+            }
+            else if(logFilename.size() == request.getLogIndex()){
+                logFilename.add(request.getFilename());
+                logBlocklist.add(request.getBlocklistList());
+                logVersion.add(request.getVersion());
+                builder.setResultValue(0);
+            }
+            else{
+                builder.setResultValue(2);
+                builder.setLatestLog(logFilename.size()-1);
+            }
+            FollowerStatus response = builder.build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();               
+        }
+
+        @Override
+        public void commitOperation(surfstore.SurfStoreBasic.Empty request,
+            io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.Empty> responseObserver) {
+            blocklistMap.put(logFilename.get(logFilename.size()-1), logBlocklist.get(logBlocklist.size()-1));
+            versionMap.put(logFilename.get(logFilename.size()-1), logVersion.get(logVersion.size()-1));
+            Empty response = Empty.newBuilder().build();
+            responseObserver.onNext(response);
+            responseObserver.onCompleted();
         }
 
     }
