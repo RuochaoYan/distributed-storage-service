@@ -30,14 +30,18 @@ public final class MetadataStore {
 	protected ConfigReader config;
     protected boolean isLeader;
 
-    public MetadataStore(ConfigReader config, boolean isLeader) {
+    //added member
+    protected boolean isDistributed;
+
+    public MetadataStore(ConfigReader config, boolean isLeader, boolean isDistributed) {
     	this.config = config;
         this.isLeader = isLeader;
+        this.isDistributed = isDistributed;
 	}
 
 	private void start(int port, int numThreads) throws IOException {
         server = ServerBuilder.forPort(port)
-                .addService(new MetadataStoreImpl(config, isLeader))
+                .addService(new MetadataStoreImpl(config, isLeader, isDistributed))
                 .executor(Executors.newFixedThreadPool(numThreads))
                 .build()
                 .start();
@@ -97,8 +101,9 @@ public final class MetadataStore {
         }
 
         boolean isLeader = c_args.getInt("number") == config.getLeaderNum() ? true : false;
+        boolean isDistributed = c_args.getInt("number") > 1;
 
-        final MetadataStore server = new MetadataStore(config, isLeader);
+        final MetadataStore server = new MetadataStore(config, isLeader, isDistributed);
         server.start(config.getMetadataPort(c_args.getInt("number")), c_args.getInt("threads"));
         server.blockUntilShutdown();
     }
@@ -115,12 +120,15 @@ public final class MetadataStore {
         protected List<Integer> logVersion;
         protected boolean isCrashed;
 
+        // added member
+        protected boolean isDistributed;
+
         private final ManagedChannel followerMetadataChannel1;
         private final MetadataStoreGrpc.MetadataStoreBlockingStub followerMetadataStub1;
         private final ManagedChannel followerMetadataChannel2;
         private final MetadataStoreGrpc.MetadataStoreBlockingStub followerMetadataStub2;
 
-        public MetadataStoreImpl(ConfigReader config, boolean isLeader){
+        public MetadataStoreImpl(ConfigReader config, boolean isLeader, boolean isDistributed){
             super();
             this.blocklistMap = new HashMap<String, List<String>>();
             this.versionMap = new HashMap<String, Integer>();
@@ -134,12 +142,23 @@ public final class MetadataStore {
             this.logVersion = new LinkedList<Integer>();
             this.isCrashed = false;
 
-            this.followerMetadataChannel1 = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(2))
-                .usePlaintext(true).build();
-            this.followerMetadataStub1 = MetadataStoreGrpc.newBlockingStub(followerMetadataChannel1);
-            this.followerMetadataChannel2 = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(3))
-                .usePlaintext(true).build();
-            this.followerMetadataStub2 = MetadataStoreGrpc.newBlockingStub(followerMetadataChannel2);
+            // added init
+            this.isDistributed = isDistributed;
+
+            if (isDistributed) {
+                this.followerMetadataChannel1 = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(2))
+                    .usePlaintext(true).build();
+                this.followerMetadataStub1 = MetadataStoreGrpc.newBlockingStub(followerMetadataChannel1);
+                this.followerMetadataChannel2 = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(3))
+                    .usePlaintext(true).build();
+                this.followerMetadataStub2 = MetadataStoreGrpc.newBlockingStub(followerMetadataChannel2);
+            }
+            else {
+                this.followerMetadataChannel1 = null;
+                this.followerMetadataStub1 = null;
+                this.followerMetadataChannel2 = null;
+                this.followerMetadataStub2 = null;
+            }
         }
 
         @Override
@@ -259,7 +278,14 @@ public final class MetadataStore {
                         builder.setResultValue(0);
                         builder.setCurrentVersion(request.getVersion());
                         // update the log and send the log to the followers
-                        handleLogAndCommit(fileName, request.getVersion(), newBlocklist);
+                        
+                        // added condition
+                        if (isDistributed)
+                            handleLogAndCommit(fileName, request.getVersion(), newBlocklist);
+                        else {
+                            blocklistMap.put(fileName, newBlocklist);
+                            versionMap.put(fileName, request.getVersion());
+                        }
                     }
 
                 }
@@ -298,7 +324,14 @@ public final class MetadataStore {
                     List<String> newBlocklist = new LinkedList<>();
                     newBlocklist.add("0");
                     // send a log to the followers
-                    handleLogAndCommit(fileName, request.getVersion(), newBlocklist);
+
+                    // added condition
+                    if (isDistributed)
+                        handleLogAndCommit(fileName, request.getVersion(), newBlocklist);
+                    else {
+                        blocklistMap.put(fileName, newBlocklist);
+                        versionMap.put(fileName, request.getVersion());
+                    }
                 }
                 else{
                     builder.setResultValue(1);
