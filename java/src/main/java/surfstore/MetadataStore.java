@@ -223,7 +223,8 @@ public final class MetadataStore {
             if(votes >= numOfFollowers / 2){
                 Empty commitRequest = Empty.newBuilder().build();
                 for (int i = 0; i < numOfFollowers; i++) {
-                    followerMetadataStub.get(i).commitOperation(commitRequest);
+                    if (!crashedFollowers.contains(i))
+                        followerMetadataStub.get(i).commitOperation(commitRequest);
                 }
 
                 blocklistMap.put(fileName, blocklist);
@@ -263,6 +264,11 @@ public final class MetadataStore {
                             else
                                 break;
                         }
+                        stop = true;
+                    }
+                    else if (logResponse.getResult() == FollowerStatus.Result.OK) {
+                        Empty commitRequest = Empty.newBuilder().build();
+                        followerMetadataStub.get(follower).commitOperation(commitRequest);
                         stop = true;
                     }
                 }
