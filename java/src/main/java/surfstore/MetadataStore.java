@@ -102,7 +102,7 @@ public final class MetadataStore {
         }
 
         boolean isLeader = c_args.getInt("number") == config.getLeaderNum() ? true : false;
-        boolean isDistributed = c_args.getInt("number") > 1;
+        boolean isDistributed = config.getNumMetadataServers() > 1;
 
         final MetadataStore server = new MetadataStore(config, isLeader, isDistributed);
         server.start(config.getMetadataPort(c_args.getInt("number")), c_args.getInt("threads"));
@@ -124,6 +124,7 @@ public final class MetadataStore {
         // set distributed mode
         protected boolean isDistributed;
         protected int numOfFollowers;
+        protected Set<Integer> crashedFollowers;
 
         private final List<ManagedChannel> followerMetadataChannel;
         private final List<MetadataStoreGrpc.MetadataStoreBlockingStub> followerMetadataStub;
@@ -144,13 +145,16 @@ public final class MetadataStore {
 
             this.isDistributed = isDistributed;
             this.numOfFollowers = config.getNumMetadataServers() - 1;
+            this.crashedFollowers = new HashSet<>();
             this.followerMetadataChannel = new ArrayList<>();
             this.followerMetadataStub = new ArrayList<>();
 
-            for (int i = 0; i < numOfFollowers; i++) {
-                followerMetadataChannel.add(ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(i + 2))
-                .usePlaintext(true).build());
-                followerMetadataStub.add(MetadataStoreGrpc.newBlockingStub(followerMetadataChannel.get(i)));
+            if (isLeader) {
+                for (int i = 0; i < numOfFollowers; i++) {
+                    followerMetadataChannel.add(ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(i + 2))
+                    .usePlaintext(true).build());
+                    followerMetadataStub.add(MetadataStoreGrpc.newBlockingStub(followerMetadataChannel.get(i)));
+                }
             }
         }
 
@@ -187,38 +191,33 @@ public final class MetadataStore {
         }
 
         public void twoPhaseCommit(String fileName, int version, List<String> blocklist){
+            List<FollowerStatus> logResponse = new ArrayList<>();
+            List<FollowerStatus.Result> res = new ArrayList<>();
+
         // avoid race condition
             synchronized (logFilename) {
                 logFilename.add(fileName);
                 logBlocklist.add(blocklist);
                 logVersion.add(version);
-            }
-            Log appendLogRequest = Log.newBuilder().setLogIndex(logFilename.size()-1).setFilename(fileName).addAllBlocklist(blocklist).setVersion(version).build();
-            List<FollowerStatus> logResponse = new ArrayList<>();
-            List<FollowerStatus.Result> res = new ArrayList<>();
-            for (int i = 0; i < numOfFollowers; i++) {
-                logResponse.add(followerMetadataStub.get(i).appendLog(appendLogRequest));
-                res.add(logResponse.get(i).getResult());
+
+                Log appendLogRequest = Log.newBuilder().setLogIndex(logFilename.size()-1).setFilename(fileName).addAllBlocklist(blocklist).setVersion(version).build();
+                for (int i = 0; i < numOfFollowers; i++) {
+                    logResponse.add(followerMetadataStub.get(i).appendLog(appendLogRequest));
+                    res.add(logResponse.get(i).getResult());
+                }
             }
 
             int votes = 0;
             for (int i = 0; i < numOfFollowers; i++) {
                 FollowerStatus.Result r = res.get(i);
-                if(r == FollowerStatus.Result.LAG){
-                    int fLatestLog = logResponse.get(i).getLatestLog();
-                    for(int j = fLatestLog + 1; j < logFilename.size(); j++){
-                        Log uptodateRequest = Log.newBuilder().setLogIndex(j).setFilename(logFilename.get(j)).addAllBlocklist(logBlocklist.get(j)).setVersion(logVersion.get(j)).build();
-                        FollowerStatus uptodateResponse = followerMetadataStub.get(i).appendLog(uptodateRequest);
-                        if(uptodateResponse.getResult() == FollowerStatus.Result.OK){
-                            Empty commitRequest = Empty.newBuilder().build();
-                            followerMetadataStub.get(i).commitOperation(commitRequest);
-                        }
-                        else
-                            break;
-                    }
-                }
-                else if (r == FollowerStatus.Result.OK)
+                if(r == FollowerStatus.Result.OK){
                     votes++;
+                }
+                else if (!crashedFollowers.contains(i)){
+                    crashedFollowers.add(i);
+                    RestoreThread t = new RestoreThread(i);
+                    t.start();
+                }
             }
 
             if(votes >= numOfFollowers / 2){
@@ -229,6 +228,46 @@ public final class MetadataStore {
 
                 blocklistMap.put(fileName, blocklist);
                 versionMap.put(fileName, version);
+            }
+        }
+
+        class RestoreThread extends Thread {
+            private int follower;
+            
+            public RestoreThread(int followerNum) {
+                follower = followerNum;
+            }
+
+            @Override
+            public void run() {
+                boolean stop = false;
+                do {
+                    try {
+                        Thread.sleep(500);
+                    } catch(InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                    int index = logFilename.size() - 1;
+                    Log appendLogRequest = Log.newBuilder().setLogIndex(index).setFilename(logFilename.get(index)).addAllBlocklist(logBlocklist.get(index)).setVersion(logVersion.get(index)).build();
+                    FollowerStatus logResponse = followerMetadataStub.get(follower).appendLog(appendLogRequest);
+                    logger.info("Append Result is: " + logResponse.getResult());
+                    if (logResponse.getResult() == FollowerStatus.Result.LAG) {
+                        int fLatestLog = logResponse.getLatestLog();
+                        for(int j = fLatestLog + 1; j < logFilename.size(); j++){
+                            Log uptodateRequest = Log.newBuilder().setLogIndex(j).setFilename(logFilename.get(j)).addAllBlocklist(logBlocklist.get(j)).setVersion(logVersion.get(j)).build();
+                            FollowerStatus uptodateResponse = followerMetadataStub.get(follower).appendLog(uptodateRequest);
+                            if(uptodateResponse.getResult() == FollowerStatus.Result.OK){
+                                Empty commitRequest = Empty.newBuilder().build();
+                                followerMetadataStub.get(follower).commitOperation(commitRequest);
+                            }
+                            else
+                                break;
+                        }
+                        stop = true;
+                    }
+                }
+                while (!stop);
+                crashedFollowers.remove(follower);
             }
         }
 

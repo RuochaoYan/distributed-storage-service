@@ -75,6 +75,13 @@ public final class Client {
 
         String op = args.getString("operation");
         String fn = args.getString("file_name");
+
+        try {
+            File configf = new File(args.getString("config_file"));
+            ConfigReader config = new ConfigReader(configf);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
         
         switch(op) {
             case "upload":
@@ -88,6 +95,18 @@ public final class Client {
               break;
             case "getversion":
               getversion(fn);
+              break;
+            case "getversion_f":
+              initFollower(config);
+              getversion_f(fn, args.getInt("follower_number"));
+              break;
+            case "crash":
+              initFollower(config);
+              crash(args.getInt("follower_number"));
+              break;
+            case "restore":
+              initFollower(config);
+              restore(args.getInt("follower_number"));
               break;
             default:
               break;
@@ -107,6 +126,10 @@ public final class Client {
         if (args.length > 3) {
           parser.addArgument("dir").type(String.class)
                 .help("Where the user wants to download").setDefault("/");
+        }
+
+        if (args.length > 4) {
+          parser.addArgument("follower_number").type(Integer.class);
         }
         
         Namespace res = null;
@@ -128,6 +151,7 @@ public final class Client {
         ConfigReader config = new ConfigReader(configf);
 
         Client client = new Client(config);
+
         
         try {
         	client.go(c_args);
@@ -351,10 +375,51 @@ public final class Client {
         } catch(InterruptedException e) {
             e.printStackTrace();
         }
-        delete("test2.txt");
         request = FileInfo.newBuilder().setFilename("test1.txt").build();
         response = metadataStubf1.getVersion(request);
         System.out.println(response.getVersion());
     }
 
+    public void getversion_f(String fn, int follower) {
+        if (follower == 1) {
+	    metadataStubf1.ping(Empty.newBuilder().build());
+            logger.info("Successfully pinged the Metadata follower1 server");
+            FileInfo request = FileInfo.newBuilder().setFilename(fn).build();
+            FileInfo response = metadataStubf1.getVersion(request);
+            System.out.println(response.getVersion());
+        }
+        else {
+	    metadataStubf2.ping(Empty.newBuilder().build());
+            logger.info("Successfully pinged the Metadata follower2 server");
+            FileInfo request = FileInfo.newBuilder().setFilename(fn).build();
+            FileInfo response = metadataStubf2.getVersion(request);
+            System.out.println(response.getVersion());
+        }
+    }
+
+    public void crash(int follower) {
+        if (follower == 1) {
+      	    metadataStubf1.ping(Empty.newBuilder().build());
+            logger.info("Successfully pinged the Metadata follower1 server");
+            metadataStubf1.crash(Empty.newBuilder().build());
+        }
+        else {
+	    metadataStubf2.ping(Empty.newBuilder().build());
+            logger.info("Successfully pinged the Metadata follower2 server");
+            metadataStubf2.crash(Empty.newBuilder().build());
+        }
+    }
+
+    public void restore(int follower) {
+        if (follower == 1) {
+	    metadataStubf1.ping(Empty.newBuilder().build());
+            logger.info("Successfully pinged the Metadata follower1 server");
+            metadataStubf1.restore(Empty.newBuilder().build());
+        }
+        else {
+	    metadataStubf2.ping(Empty.newBuilder().build());
+            logger.info("Successfully pinged the Metadata follower2 server");
+            metadataStubf2.restore(Empty.newBuilder().build());
+        }
+    }
 }
