@@ -131,7 +131,7 @@ public final class Client {
         
         try {
         	client.go(c_args);
-		// client.distributedTest(config);
+		//client.distributedTest(config);
         } finally {
             client.shutdown();
         }
@@ -143,6 +143,9 @@ public final class Client {
             System.err.println("Not Found");
             return;
         }
+        int index = fn.lastIndexOf('/');
+        if (index >= 0)
+            fn = fn.substring(index + 1);
         byte[] buffer = new byte[4096];
         int read = 0;
 	HashMap<String, ByteString> map = new HashMap<>();
@@ -198,6 +201,10 @@ public final class Client {
 	        modifyResponse = metadataStub.modifyFile(modifyRequest);
 	        res = modifyResponse.getResult();
             }
+            else {
+                System.err.println("upload can't be called on follower!");
+                return;
+            }
         }
 
         System.out.println("OK");
@@ -227,22 +234,26 @@ public final class Client {
             return;
         }
 
-        if (f.exists() && !f.isDirectory()) {
+        File d = new File(dir);
+        for (File each : d.listFiles()) {
         	try {
-	        	FileInputStream fis = new FileInputStream(f);
+	        	FileInputStream fis = new FileInputStream(each);
 
         		while ( (read = fis.read(buffer)) > 0 ) {
 	        	    byte[] hash = digest.digest(buffer);
 	        	    String encoded = Base64.getEncoder().encodeToString(hash);
-	        	    map.put(encoded, ByteString.copyFrom(buffer));
+                            if (!map.containsKey(encoded))
+  	        	        map.put(encoded, ByteString.copyFrom(buffer));
 		        }
 			fis.close();
-			f.delete();
 		} catch (Exception e) {
 			e.printStackTrace();
 			System.exit(1);
        		}
         }
+
+        if (f.exists())
+          f.delete();
 
 	try {
 	    FileOutputStream stream = new FileOutputStream(dir + "/" + fn);
@@ -257,14 +268,17 @@ public final class Client {
 	    stream.close();
 	}
         catch (Exception e) {
-			e.printStackTrace();
-			System.exit(1);
+	    e.printStackTrace();
+	    System.exit(1);
         }
         System.out.println("OK");
     }
 
     public void delete(String fn) {
 
+        int index = fn.lastIndexOf('/');
+        if (index >= 0)
+            fn = fn.substring(index + 1);
         FileInfo readRequest = FileInfo.newBuilder().setFilename(fn).build();
         FileInfo readResponse = metadataStub.readFile(readRequest);
         List<String> blocklist = readResponse.getBlocklistList();
@@ -285,6 +299,10 @@ public final class Client {
 	        deleteResponse = metadataStub.deleteFile(deleteRequest);
 	        res = deleteResponse.getResult();
 	    }
+            else {
+                System.err.println("errors happen in delete!");
+                return;
+            }
 	}
 
 	System.out.println("OK");
@@ -292,6 +310,9 @@ public final class Client {
     }
 
     public void getversion(String fn) {
+        int index = fn.lastIndexOf('/');
+        if (index >= 0)
+            fn = fn.substring(index + 1);
         FileInfo request = FileInfo.newBuilder().setFilename(fn).build();
         FileInfo response = metadataStub.getVersion(request);
         System.out.println(response.getVersion());

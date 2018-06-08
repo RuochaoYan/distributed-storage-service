@@ -10,6 +10,7 @@ import java.util.Set;
 import java.util.HashSet;
 import java.util.List;
 import java.util.LinkedList;
+import java.util.ArrayList;
 
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
@@ -27,17 +28,17 @@ public final class MetadataStore {
     private static final Logger logger = Logger.getLogger(MetadataStore.class.getName());
 
     protected Server server;
-	protected ConfigReader config;
+    protected ConfigReader config;
     protected boolean isLeader;
 
-    //added member
+    //set distributed mode
     protected boolean isDistributed;
 
     public MetadataStore(ConfigReader config, boolean isLeader, boolean isDistributed) {
     	this.config = config;
         this.isLeader = isLeader;
         this.isDistributed = isDistributed;
-	}
+    }
 
 	private void start(int port, int numThreads) throws IOException {
         server = ServerBuilder.forPort(port)
@@ -120,13 +121,12 @@ public final class MetadataStore {
         protected List<Integer> logVersion;
         protected boolean isCrashed;
 
-        // added member
+        // set distributed mode
         protected boolean isDistributed;
+        protected int numOfFollowers;
 
-        private final ManagedChannel followerMetadataChannel1;
-        private final MetadataStoreGrpc.MetadataStoreBlockingStub followerMetadataStub1;
-        private final ManagedChannel followerMetadataChannel2;
-        private final MetadataStoreGrpc.MetadataStoreBlockingStub followerMetadataStub2;
+        private final List<ManagedChannel> followerMetadataChannel;
+        private final List<MetadataStoreGrpc.MetadataStoreBlockingStub> followerMetadataStub;
 
         public MetadataStoreImpl(ConfigReader config, boolean isLeader, boolean isDistributed){
             super();
@@ -142,22 +142,15 @@ public final class MetadataStore {
             this.logVersion = new LinkedList<Integer>();
             this.isCrashed = false;
 
-            // added init
             this.isDistributed = isDistributed;
+            this.numOfFollowers = config.getNumMetadataServers() - 1;
+            this.followerMetadataChannel = new ArrayList<>();
+            this.followerMetadataStub = new ArrayList<>();
 
-            if (isDistributed) {
-                this.followerMetadataChannel1 = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(2))
-                    .usePlaintext(true).build();
-                this.followerMetadataStub1 = MetadataStoreGrpc.newBlockingStub(followerMetadataChannel1);
-                this.followerMetadataChannel2 = ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(3))
-                    .usePlaintext(true).build();
-                this.followerMetadataStub2 = MetadataStoreGrpc.newBlockingStub(followerMetadataChannel2);
-            }
-            else {
-                this.followerMetadataChannel1 = null;
-                this.followerMetadataStub1 = null;
-                this.followerMetadataChannel2 = null;
-                this.followerMetadataStub2 = null;
+            for (int i = 0; i < numOfFollowers; i++) {
+                followerMetadataChannel.add(ManagedChannelBuilder.forAddress("127.0.0.1", config.getMetadataPort(i + 2))
+                .usePlaintext(true).build());
+                followerMetadataStub.add(MetadataStoreGrpc.newBlockingStub(followerMetadataChannel.get(i)));
             }
         }
 
@@ -168,7 +161,6 @@ public final class MetadataStore {
             responseObserver.onCompleted();
         }
 
-        // TODO: Implement the other RPCs!
         @Override
         public void readFile(surfstore.SurfStoreBasic.FileInfo request,
             io.grpc.stub.StreamObserver<surfstore.SurfStoreBasic.FileInfo> responseObserver) {
@@ -194,45 +186,46 @@ public final class MetadataStore {
             responseObserver.onCompleted();  
         }
 
-        public void handleLogAndCommit(String fileName, int version, List<String> blocklist){
-            logFilename.add(fileName);
-            logBlocklist.add(blocklist);
-            logVersion.add(version);
+        public void twoPhaseCommit(String fileName, int version, List<String> blocklist){
+        // avoid race condition
+            synchronized (logFilename) {
+                logFilename.add(fileName);
+                logBlocklist.add(blocklist);
+                logVersion.add(version);
+            }
             Log appendLogRequest = Log.newBuilder().setLogIndex(logFilename.size()-1).setFilename(fileName).addAllBlocklist(blocklist).setVersion(version).build();
-            FollowerStatus logResponse1 = followerMetadataStub1.appendLog(appendLogRequest);
-            FollowerStatus logResponse2 = followerMetadataStub2.appendLog(appendLogRequest);
-            FollowerStatus.Result res1 = logResponse1.getResult();
-            FollowerStatus.Result res2 = logResponse2.getResult();
-            if(res1 == FollowerStatus.Result.LAG){
-                int f1LatestLog = logResponse1.getLatestLog();
-                for(int i = f1LatestLog+1; i < logFilename.size(); i++){
-                    Log uptodateRequest = Log.newBuilder().setLogIndex(i).setFilename(logFilename.get(i)).addAllBlocklist(logBlocklist.get(i)).setVersion(logVersion.get(i)).build();
-                    FollowerStatus uptodateResponse = followerMetadataStub1.appendLog(uptodateRequest);
-                    if(uptodateResponse.getResult() == FollowerStatus.Result.OK){
-                        Empty commitRequest = Empty.newBuilder().build();
-                        followerMetadataStub1.commitOperation(commitRequest);
-                    }
-                    else
-                        break;
-                }
+            List<FollowerStatus> logResponse = new ArrayList<>();
+            List<FollowerStatus.Result> res = new ArrayList<>();
+            for (int i = 0; i < numOfFollowers; i++) {
+                logResponse.add(followerMetadataStub.get(i).appendLog(appendLogRequest));
+                res.add(logResponse.get(i).getResult());
             }
-            if(res2 == FollowerStatus.Result.LAG){
-                int f2LatestLog = logResponse2.getLatestLog();
-                for(int i = f2LatestLog+1; i < logFilename.size(); i++){
-                    Log uptodateRequest = Log.newBuilder().setLogIndex(i).setFilename(logFilename.get(i)).addAllBlocklist(logBlocklist.get(i)).setVersion(logVersion.get(i)).build();
-                    FollowerStatus uptodateResponse = followerMetadataStub2.appendLog(uptodateRequest);
-                    if(uptodateResponse.getResult() != FollowerStatus.Result.OK){
-                        Empty commitRequest = Empty.newBuilder().build();
-                        followerMetadataStub2.commitOperation(commitRequest);
+
+            int votes = 0;
+            for (int i = 0; i < numOfFollowers; i++) {
+                FollowerStatus.Result r = res.get(i);
+                if(r == FollowerStatus.Result.LAG){
+                    int fLatestLog = logResponse.get(i).getLatestLog();
+                    for(int j = fLatestLog + 1; j < logFilename.size(); j++){
+                        Log uptodateRequest = Log.newBuilder().setLogIndex(j).setFilename(logFilename.get(j)).addAllBlocklist(logBlocklist.get(j)).setVersion(logVersion.get(j)).build();
+                        FollowerStatus uptodateResponse = followerMetadataStub.get(i).appendLog(uptodateRequest);
+                        if(uptodateResponse.getResult() == FollowerStatus.Result.OK){
+                            Empty commitRequest = Empty.newBuilder().build();
+                            followerMetadataStub.get(i).commitOperation(commitRequest);
+                        }
+                        else
+                            break;
                     }
-                    else
-                        break;
                 }
+                else if (r == FollowerStatus.Result.OK)
+                    votes++;
             }
-            if(res1 == FollowerStatus.Result.OK || res2 == FollowerStatus.Result.OK){
+
+            if(votes >= numOfFollowers / 2){
                 Empty commitRequest = Empty.newBuilder().build();
-                followerMetadataStub1.commitOperation(commitRequest);
-                followerMetadataStub2.commitOperation(commitRequest);
+                for (int i = 0; i < numOfFollowers; i++) {
+                    followerMetadataStub.get(i).commitOperation(commitRequest);
+                }
 
                 blocklistMap.put(fileName, blocklist);
                 versionMap.put(fileName, version);
@@ -279,9 +272,9 @@ public final class MetadataStore {
                         builder.setCurrentVersion(request.getVersion());
                         // update the log and send the log to the followers
                         
-                        // added condition
-                        if (isDistributed)
-                            handleLogAndCommit(fileName, request.getVersion(), newBlocklist);
+                        if (isDistributed) {
+                            twoPhaseCommit(fileName, request.getVersion(), newBlocklist);
+                        }
                         else {
                             blocklistMap.put(fileName, newBlocklist);
                             versionMap.put(fileName, request.getVersion());
@@ -325,9 +318,9 @@ public final class MetadataStore {
                     newBlocklist.add("0");
                     // send a log to the followers
 
-                    // added condition
-                    if (isDistributed)
-                        handleLogAndCommit(fileName, request.getVersion(), newBlocklist);
+                    if (isDistributed) {
+                        twoPhaseCommit(fileName, request.getVersion(), newBlocklist);
+                    }
                     else {
                         blocklistMap.put(fileName, newBlocklist);
                         versionMap.put(fileName, request.getVersion());
