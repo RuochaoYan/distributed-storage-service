@@ -183,8 +183,8 @@ public final class MetadataStore {
                     }
                 }
                 builder.setVersion(version);
-                builder.setFilename(request.getFilename());
             }
+            builder.setFilename(request.getFilename());
             FileInfo response = builder.build();
             responseObserver.onNext(response);
             responseObserver.onCompleted();  
